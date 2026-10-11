@@ -154,11 +154,20 @@ static void SS_EnsureTiles(void) {
     // Korean build: the game's HUD sheets carry Korean glyph pieces where the
     // English letters were, so the bottom-screen UI uses the USA copies that the
     // Korean font block keeps (part 3).
+    // Any Korean language in the assets means the HUD sheets are the Korean
+    // ones, whichever language is selected, so look the language up directly.
     const uint8 *src = kSprGfx(kSheets[s]).ptr;
-    if (g_zenv.dialogue_flags & kDialogueFlag_Korean) {
-      MemBlk usa = FindIndexInMemblk(FindIndexInMemblk(g_zenv.dialogue_font_blk, 3), s);
-      if (usa.ptr && usa.size)
-        src = usa.ptr;
+    for (int i = 0; ; i++) {
+      MemBlk entry = kDialogueMap(i);
+      if (!entry.ptr)
+        break;
+      MemBlk conf = FindIndexInMemblk(entry, 1);
+      if (conf.size >= 3 && (conf.ptr[2] & kDialogueFlag_Korean)) {
+        MemBlk usa = FindIndexInMemblk(FindIndexInMemblk(kDialogueFont(conf.ptr[1]), 3), s);
+        if (usa.ptr && usa.size)
+          src = usa.ptr;
+        break;
+      }
     }
     Decompress(raw, src);  // HUD sheets are sprite-gfx packs (see Decomp_spr)
     for (int t = 0; t < 128; t++) {
