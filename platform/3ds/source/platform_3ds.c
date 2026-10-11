@@ -28,6 +28,7 @@ static uint32_t *g_update_pixels;
 #include "types.h"
 #include "second_screen_tables.h"
 #include "util.h"
+#include "ko_terms.h"
 #include "zelda_rtl.h"
 #include "snes/ppu.h"
 
@@ -2920,6 +2921,281 @@ static size_t KoCompressedLength(const uint8 *rom, size_t rom_size, size_t p) {
   return 0;
 }
 
+
+// ---- Korean term unification helpers (rules in ko_terms.h) ----
+static const char *KoUtf8Next(const char *s, uint32 *cp) {
+  const uint8 *p = (const uint8 *)s;
+  if (p[0] < 0x80) { *cp = p[0]; return s + 1; }
+  if ((p[0] & 0xe0) == 0xc0 && p[1]) { *cp = (p[0] & 0x1f) << 6 | (p[1] & 0x3f); return s + 2; }
+  if ((p[0] & 0xf0) == 0xe0 && p[1] && p[2]) {
+    *cp = (p[0] & 0x0f) << 12 | (p[1] & 0x3f) << 6 | (p[2] & 0x3f);
+    return s + 3;
+  }
+  *cp = '?';
+  return s + 1;
+}
+
+static bool KoTermGlyphFor(uint32 cp, uint8 *page, uint8 *idx) {
+  if (cp == ' ') { *page = 9; *idx = 0x59; return true; }
+  for (size_t i = 0; i < countof(kKoTermGlyphs); i++)
+    if (kKoTermGlyphs[i].cp == cp) {
+      *page = kKoTermGlyphs[i].page;
+      *idx = kKoTermGlyphs[i].idx;
+      return true;
+    }
+  return false;
+}
+
+typedef struct KoTok { bool glyph; uint8 page, idx; uint16 start, len; } KoTok;
+
+// Splits a message into glyphs (with the font page in effect) and other bytes.
+static int KoTokenize(const uint8 *m, size_t n, KoTok *toks, int max_toks) {
+  static const uint8 kArgs[] = {
+    0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0,
+  };
+  int count = 0;
+  uint8 page = 0;
+  size_t i = 0;
+  while (i < n && count < max_toks) {
+    uint8 c = m[i];
+    KoTok t = { false, 0, 0, (uint16)i, 1 };
+    if (c >= 0x5c && c <= 0x65 && i + 1 < n && m[i + 1] < 0x5c) {
+      page = c - 0x5c;
+      t = (KoTok){ true, page, m[i + 1], (uint16)i, 2 };
+    } else if (c >= 0x5c && c <= 0x65) {
+      page = c - 0x5c;
+    } else if (c < 0x5c) {
+      t = (KoTok){ true, page, c, (uint16)i, 1 };
+    } else if (c >= 0x67 && c < 0x80) {
+      t.len = 1 + kArgs[c - 0x67];
+      if (i + t.len > n)
+        t.len = (uint16)(n - i);
+    }
+    toks[count++] = t;
+    i += t.len;
+  }
+  return i >= n ? count : -1;
+}
+
+static bool KoTokIs(const KoTok *t, uint32 cp) {
+  uint8 page, idx;
+  if (!t->glyph || !KoTermGlyphFor(cp, &page, &idx))
+    return false;
+  return cp == ' ' ? t->idx == 0x59 : (t->page == page && t->idx == idx);
+}
+
+// Matches a rule's source word at toks[i]; returns its length in tokens or 0.
+static int KoMatchWord(const KoTok *toks, int count, int i, const char *word) {
+  int k = i;
+  uint32 cp;
+  while (*word) {
+    word = KoUtf8Next(word, &cp);
+    if (k >= count || !KoTokIs(&toks[k], cp))
+      return 0;
+    k++;
+  }
+  return k - i;
+}
+
+static bool KoEmitGlyph(ByteArray *out, uint32 cp) {
+  uint8 page, idx;
+  if (!KoTermGlyphFor(cp, &page, &idx))
+    return false;
+  uint8 b[2] = { (uint8)(0x5c + page), idx };
+  ByteArray_AppendData(out, b, 2);
+  return true;
+}
+
+// Applies kKoTermRules to one message and fixes the particle that follows a
+// replaced word (을/를, 은/는, 과/와) for the new word's final consonant.
+static bool KoApplyTerms(const uint8 *m, size_t n, ByteArray *out) {
+  static const uint32 kJosa[][2] = {  // {after a final consonant, after a vowel}
+    { 0xc744, 0xb97c },  // 을 를
+    { 0xc740, 0xb294 },  // 은 는
+    { 0xacfc, 0xc640 },  // 과 와
+  };
+  KoTok toks[1024];
+  int count = KoTokenize(m, n, toks, countof(toks));
+  if (count < 0)
+    return false;
+  for (int i = 0; i < count;) {
+    const KoTok *t = &toks[i];
+    int matched = 0;
+    const char *to = NULL;
+    for (size_t r = 0; t->glyph && r < countof(kKoTermRules) && !matched; r++) {
+      matched = KoMatchWord(toks, count, i, kKoTermRules[r].from);
+      to = kKoTermRules[r].to;
+    }
+    if (matched) {
+      uint32 cp = 0, last = 0;
+      const char *w = to;
+      while (*w) {
+        w = KoUtf8Next(w, &cp);
+        if (!KoEmitGlyph(out, cp))
+          return false;
+        last = cp;
+      }
+      i += matched;
+      bool final_consonant = last >= 0xac00 && last <= 0xd7a3 && (last - 0xac00) % 28 != 0;
+      for (size_t j = 0; i < count && j < countof(kJosa); j++) {
+        if (KoTokIs(&toks[i], kJosa[j][0]) || KoTokIs(&toks[i], kJosa[j][1])) {
+          if (!KoEmitGlyph(out, kJosa[j][final_consonant ? 0 : 1]))
+            return false;
+          i++;
+          break;
+        }
+      }
+      continue;
+    }
+    if (t->glyph) {
+      // Always state the page: an earlier replacement may have changed it.
+      uint8 b[2] = { (uint8)(0x5c + t->page), t->idx };
+      ByteArray_AppendData(out, b, 2);
+    } else {
+      ByteArray_AppendData(out, m + t->start, t->len);
+    }
+    i++;
+  }
+  return true;
+}
+
+// Raw LZ stream (copy commands only) that the engine's Decompress accepts.
+static bool KoCompressRaw(const uint8 *src, size_t n, OwnedBlock *out) {
+  size_t chunks = (n + 1023) / 1024;
+  out->data = malloc(n + chunks * 2 + 1);
+  if (!out->data)
+    return false;
+  uint8 *w = out->data;
+  for (size_t pos = 0; pos < n;) {
+    size_t len = n - pos > 1024 ? 1024 : n - pos;
+    *w++ = 0xe0 | (uint8)(((len - 1) >> 8) & 3);
+    *w++ = (uint8)((len - 1) & 0xff);
+    memcpy(w, src + pos, len);
+    w += len;
+    pos += len;
+  }
+  *w++ = 0xff;
+  out->size = w - out->data;
+  return true;
+}
+
+static size_t KoDecompress(const uint8 *src, size_t src_size, uint8 *dst, size_t cap) {
+  size_t p = 0, o = 0;
+  while (p < src_size) {
+    uint8 b = src[p++];
+    if (b == 0xff)
+      return o;
+    uint32 cmd, len;
+    if ((b & 0xe0) == 0xe0) {
+      if (p >= src_size) return 0;
+      cmd = (b >> 2) & 7;
+      len = (((b & 3) << 8) | src[p++]) + 1;
+    } else {
+      cmd = b >> 5;
+      len = (b & 0x1f) + 1;
+    }
+    if (o + len > cap) return 0;
+    if (cmd == 0) {
+      if (p + len > src_size) return 0;
+      memcpy(dst + o, src + p, len);
+      p += len;
+    } else if (cmd == 1) {
+      if (p >= src_size) return 0;
+      memset(dst + o, src[p++], len);
+    } else if (cmd == 2) {
+      if (p + 2 > src_size) return 0;
+      for (uint32 k = 0; k < len; k++) dst[o + k] = src[p + (k & 1)];
+      p += 2;
+    } else if (cmd == 3) {
+      if (p >= src_size) return 0;
+      for (uint32 k = 0; k < len; k++) dst[o + k] = (uint8)(src[p] + k);
+      p++;
+    } else {
+      if (p + 2 > src_size) return 0;
+      size_t from = src[p] | src[p + 1] << 8;
+      p += 2;
+      for (uint32 k = 0; k < len; k++) {
+        if (from + k >= o + k) return 0;
+        dst[o + k] = dst[from + k];
+      }
+    }
+    o += len;
+  }
+  return 0;
+}
+
+// Draws the new menu syllables into the HUD sheets (tile ids 0-383 map to
+// sprite sheets 0x6A, 0x6B, 0x69, 128 tiles each).
+static bool KoApplyMenuTiles(OwnedBlock *spr, int spr_count) {
+  static const int kSheets[3] = { 0x6a, 0x6b, 0x69 };
+  for (int s = 0; s < 3; s++) {
+    if (kSheets[s] >= spr_count)
+      return false;
+    bool touched = false;
+    for (size_t t = 0; t < countof(kKoMenuTiles); t++)
+      touched |= kKoMenuTiles[t].tile / 128 == s;
+    if (!touched)
+      continue;
+    uint8 raw[0x800];
+    OwnedBlock *blk = &spr[kSheets[s]];
+    if (KoDecompress(blk->data, blk->size, raw, sizeof(raw)) != sizeof(raw))
+      return false;
+    for (size_t t = 0; t < countof(kKoMenuTiles); t++) {
+      if (kKoMenuTiles[t].tile / 128 != s)
+        continue;
+      uint8 *tile = raw + (kKoMenuTiles[t].tile % 128) * 16;
+      for (int y = 0; y < 8; y++) {
+        tile[y * 2] = (uint8)~kKoMenuTiles[t].rows[y];  // plane 0: background only
+        tile[y * 2 + 1] = 0xff;                          // plane 1: ink and background
+      }
+    }
+    OwnedBlock packed = {0};
+    if (!KoCompressRaw(raw, sizeof(raw), &packed))
+      return false;
+    free(blk->data);
+    *blk = packed;
+  }
+  return true;
+}
+
+// Writes the added 퀘 glyph into an empty slot of the dialogue font.
+static void KoAddKweGlyph(uint8 *pages) {
+  uint8 img[16][16] = {{0}};
+  for (int y = 0; y < 16; y++)
+    for (int x = 0; x < 16; x++)
+      if (kKoGlyphKwe[y] & (0x8000 >> x))
+        img[y][x] = 2;
+  for (int y = 0; y < 16; y++)
+    for (int x = 0; x < 16; x++) {
+      if (img[y][x])
+        continue;
+      for (int dy = -1; dy <= 1 && !img[y][x]; dy++)
+        for (int dx = -1; dx <= 1; dx++) {
+          int yy = y + dy, xx = x + dx;
+          if (yy >= 0 && yy < 16 && xx >= 0 && xx < 16 && img[yy][xx] == 2) {
+            img[y][x] = 1;
+            break;
+          }
+        }
+    }
+  uint8 page = 0, idx = 0x50;
+  int r10 = (((idx & 0x70) * 2) + (idx & 0xf)) * 2;
+  static const int kTile[4][3] = {{0, 0, 0}, {1, 8, 0}, {32, 0, 8}, {33, 8, 8}};
+  for (int t = 0; t < 4; t++) {
+    uint8 *tp = pages + page * kKoFontPageSize + (r10 + kTile[t][0]) * 16;
+    for (int y = 0; y < 8; y++) {
+      uint8 b0 = 0, b1 = 0;
+      for (int x = 0; x < 8; x++) {
+        uint8 v = img[kTile[t][2] + y][kTile[t][1] + x];
+        b0 |= (v & 1) << (7 - x);
+        b1 |= ((v >> 1) & 1) << (7 - x);
+      }
+      tp[y * 2] = b0;
+      tp[y * 2 + 1] = b1;
+    }
+  }
+}
+
 static bool KoBuildGraphics(const uint8 *rom, size_t rom_size,
                             OwnedBlock *spr_out, OwnedBlock *bg_out) {
   OwnedBlock bg[kKoBgSheets] = {0};
@@ -2936,7 +3212,8 @@ static bool KoBuildGraphics(const uint8 *rom, size_t rom_size,
         (p < rom_size ? KoCompressedLength(rom, rom_size, p) : 0);
     ok = len != 0 && p + len <= rom_size && CopyBlock(&spr[i], rom + p, len);
   }
-  ok = ok && PackBlocks(spr, kKoSprSheets, spr_out) &&
+  ok = ok && KoApplyMenuTiles(spr, kKoSprSheets) &&
+       PackBlocks(spr, kKoSprSheets, spr_out) &&
        PackBlocks(bg, kKoBgSheets, bg_out);
   FreeBlocks(bg, kKoBgSheets);
   FreeBlocks(spr, kKoSprSheets);
@@ -3000,7 +3277,12 @@ static bool KoBuildDialogue(const uint8 *rom, size_t rom_size,
         break;
       p += 1 + ((c >= 0x67 && c < 0x80) ? kCommandArgBytes[c - 0x67] : 0);
     }
-    if (!CopyBlock(&messages[m], rom + start, p - start))
+    ByteArray unified = {0};
+    bool term_ok = KoApplyTerms(rom + start, p - start, &unified);
+    if (term_ok)
+      term_ok = CopyBlock(&messages[m], unified.data, unified.size);
+    ByteArray_Destroy(&unified);
+    if (!term_ok)
       goto done;
   }
   parts[0] = base_parts[0];
@@ -3041,12 +3323,21 @@ static bool KoBuildFont(const uint8 *rom, size_t rom_size,
     for (int i = 0; i < kKoFontPages; i++)
       memcpy(parts[0].data + i * kKoFontPageSize,
              rom + kKoFontBase + i * kKoFontPageStride, kKoFontPageSize);
+    KoAddKweGlyph(parts[0].data);
     uint8 *w = parts[2].data;
     for (size_t i = 0; i < countof(kKoHudRegions); i++) {
       uint32 offs = kKoHudRegions[i].offset, size = kKoHudRegions[i].size;
       w[0] = offs, w[1] = offs >> 8, w[2] = offs >> 16, w[3] = offs >> 24;
       w[4] = size, w[5] = size >> 8;
       memcpy(w + 6, rom + offs, size);
+      for (size_t n = 0; n < countof(kKoMenuNames); n++) {
+        uint32 at = kKoMenuNames[n].rom_offset;
+        if (at >= offs && at + 16 <= offs + size)
+          for (int k = 0; k < 8; k++) {
+            w[6 + at - offs + k * 2] = (uint8)kKoMenuNames[n].words[k];
+            w[6 + at - offs + k * 2 + 1] = (uint8)(kKoMenuNames[n].words[k] >> 8);
+          }
+      }
       w += 6 + size;
     }
     parts[2].size = hud_size;
