@@ -1,3 +1,5 @@
+![젤다의 전설 신들의 트라이포스 3DS 한국어판](https://raw.githubusercontent.com/drillerboys-beep/zelda-alttp-3ds/korean/docs/korean_showcase.png)
+
 SFC판 「젤다의 전설 신들의 트라이포스」 한글패치 롬을 3DS 포팅판에서 실행할 수 있게 만든 한국어판입니다.
 
 **이 파일에는 롬, 패치 파일, 번역문이 들어 있지 않습니다.** 한글 대사와 글꼴은 직접 가진 한글판 롬에서 첫 실행 때 읽어 옵니다.

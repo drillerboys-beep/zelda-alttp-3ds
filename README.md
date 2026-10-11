@@ -1,5 +1,7 @@
 # Zelda A Link to the Past 3DS
 
+<img src="docs/korean_showcase.png" alt="젤다의 전설 신들의 트라이포스 3DS 한국어판" width="100%" />
+
 > **한국어판 (Korean build)** — 이 포크는 싸이제로님의 SFC 한글패치 롬을 3DS 포팅판에서 실행할 수 있게 한 한국어판입니다.
 > 받기: [Releases](../../releases/latest) · 설치 방법과 감사의 말: [docs/KOREAN.md](docs/KOREAN.md)
 >
