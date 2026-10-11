@@ -2943,6 +2943,27 @@ static bool KoBuildGraphics(const uint8 *rom, size_t rom_size,
   return ok;
 }
 
+// Locates asset `index` inside an assets blob.
+static bool KoAssetSlice(const uint8 *blob, size_t blob_size, uint32 index,
+                         const uint8 **ptr, size_t *size) {
+  uint32 asset_count = ReadU32LE(blob + 80);
+  uint32 names_size = ReadU32LE(blob + 84);
+  size_t offset = 88 + asset_count * 4 + names_size;
+  for (uint32 i = 0; i < asset_count; i++) {
+    uint32 n = ReadU32LE(blob + 88 + i * 4);
+    offset = (offset + 3) & ~3;
+    if (offset + n > blob_size)
+      return false;
+    if (i == index) {
+      *ptr = blob + offset;
+      *size = n;
+      return true;
+    }
+    offset += n;
+  }
+  return false;
+}
+
 // Dialogue block: the USA dictionary (the Korean text still uses its first
 // few space entries) followed by the 397 Korean messages.
 static bool KoBuildDialogue(const uint8 *rom, size_t rom_size,
@@ -2957,24 +2978,10 @@ static bool KoBuildDialogue(const uint8 *rom, size_t rom_size,
   OwnedBlock messages[kKoMessageCount] = {0};
   bool ok = false;
 
-  // Locate asset 94 (kDialogue) in the base blob.
-  uint32 asset_count = ReadU32LE(base_assets + 80);
-  uint32 names_size = ReadU32LE(base_assets + 84);
-  size_t offset = 88 + asset_count * 4 + names_size;
   const uint8 *dialogue_asset = NULL;
   size_t dialogue_asset_size = 0;
-  for (uint32 i = 0; i < asset_count; i++) {
-    uint32 size = ReadU32LE(base_assets + 88 + i * 4);
-    offset = (offset + 3) & ~3;
-    if (offset + size > base_assets_size)
-      return false;
-    if (i == kAssetIndex_Dialogue) {
-      dialogue_asset = base_assets + offset;
-      dialogue_asset_size = size;
-    }
-    offset += size;
-  }
-  if (!dialogue_asset ||
+  if (!KoAssetSlice(base_assets, base_assets_size, kAssetIndex_Dialogue,
+                    &dialogue_asset, &dialogue_asset_size) ||
       !UnpackBlocks(dialogue_asset, dialogue_asset_size, &languages, &language_count) ||
       language_count < 1 ||
       !UnpackBlocks(languages[0].data, languages[0].size, &base_parts, &base_part_count) ||
@@ -3013,9 +3020,14 @@ done:
   return ok;
 }
 
-// Font block: [font pages][glyph widths][menu tilemap patch records].
-static bool KoBuildFont(const uint8 *rom, size_t rom_size, OwnedBlock *font_out) {
-  OwnedBlock parts[3] = {0};
+// Font block: [font pages][glyph widths][menu tilemap patch records]
+// [USA HUD sheets 0x6A, 0x6B, 0x69 for the bottom-screen UI, whose English
+// labels are drawn from those tiles; the Korean ROM redraws them].
+static bool KoBuildFont(const uint8 *rom, size_t rom_size,
+                        const uint8 *base_assets, size_t base_assets_size,
+                        OwnedBlock *font_out) {
+  static const int kBottomScreenSheets[3] = { 0x6a, 0x6b, 0x69 };
+  OwnedBlock parts[4] = {0};
   bool ok = true;
   size_t hud_size = 0;
   for (size_t i = 0; i < countof(kKoHudRegions); i++)
@@ -3038,10 +3050,27 @@ static bool KoBuildFont(const uint8 *rom, size_t rom_size, OwnedBlock *font_out)
       w += 6 + size;
     }
     parts[2].size = hud_size;
-    ok = CopyBlock(&parts[1], rom + kKoFontWidths, kKoFontWidthsSize) &&
-         PackBlocks(parts, 3, font_out);
+    ok = CopyBlock(&parts[1], rom + kKoFontWidths, kKoFontWidthsSize);
+    // USA HUD sheets from the base assets.
+    const uint8 *spr = NULL;
+    size_t spr_size = 0;
+    OwnedBlock *sheets = NULL;
+    int sheet_count = 0;
+    OwnedBlock picked[3] = {0};
+    ok = ok && KoAssetSlice(base_assets, base_assets_size, kAssetIndex_SprGfx,
+                            &spr, &spr_size) &&
+         UnpackBlocks(spr, spr_size, &sheets, &sheet_count);
+    for (int i = 0; ok && i < 3; i++)
+      ok = kBottomScreenSheets[i] < sheet_count &&
+           CopyBlock(&picked[i], sheets[kBottomScreenSheets[i]].data,
+                     sheets[kBottomScreenSheets[i]].size);
+    ok = ok && PackBlocks(picked, 3, &parts[3]) && PackBlocks(parts, 4, font_out);
+    FreeBlocks(picked, 3);
+    if (sheets)
+      FreeBlocks(sheets, sheet_count);
+    free(sheets);
   }
-  FreeBlocks(parts, 3);
+  FreeBlocks(parts, 4);
   (void)rom_size;
   return ok;
 }
@@ -3113,7 +3142,7 @@ static bool TryBuildKoreanAssets(const uint8 *rom, size_t rom_size,
   }
   OwnedBlock dialogue = {0}, font = {0}, spr = {0}, bg = {0};
   bool ok = KoBuildDialogue(rom, rom_size, base, base_size, &dialogue) &&
-            KoBuildFont(rom, rom_size, &font) &&
+            KoBuildFont(rom, rom_size, base, base_size, &font) &&
             KoBuildGraphics(rom, rom_size, &spr, &bg);
   LogSetup("Korean: dialogue %lu, font %lu, spr %lu, bg %lu bytes",
            (unsigned long)dialogue.size, (unsigned long)font.size,

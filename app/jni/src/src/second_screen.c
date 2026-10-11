@@ -151,7 +151,16 @@ static void SS_EnsureTiles(void) {
   static const uint8 kSheets[3] = {0x6a, 0x6b, 0x69};  // same order as tile ids 0x000-0x17F
   uint8 raw[0x1000];
   for (int s = 0; s < 3; s++) {
-    Decompress(raw, kSprGfx(kSheets[s]).ptr);  // HUD sheets are sprite-gfx packs (see Decomp_spr)
+    // Korean build: the game's HUD sheets carry Korean glyph pieces where the
+    // English letters were, so the bottom-screen UI uses the USA copies that the
+    // Korean font block keeps (part 3).
+    const uint8 *src = kSprGfx(kSheets[s]).ptr;
+    if (g_zenv.dialogue_flags & kDialogueFlag_Korean) {
+      MemBlk usa = FindIndexInMemblk(FindIndexInMemblk(g_zenv.dialogue_font_blk, 3), s);
+      if (usa.ptr && usa.size)
+        src = usa.ptr;
+    }
+    Decompress(raw, src);  // HUD sheets are sprite-gfx packs (see Decomp_spr)
     for (int t = 0; t < 128; t++) {
       const uint8 *tp = raw + t * 16;
       uint8 *out = g_ss_tiles + (s * 128 + t) * 64;
