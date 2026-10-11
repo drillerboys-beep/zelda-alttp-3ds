@@ -3,6 +3,8 @@
 
 #include "variables.h"
 #include "messaging.h"
+#include "load_gfx.h"
+#include "assets.h"
 
 enum {
   kNewStyleInventory = 0,
@@ -1247,6 +1249,127 @@ void Hud_DrawProgressIcons_Crystals() {  // 8dea62
   }
 }
 
+// Korean: lay out the selected item's name pixel by pixel. The translation's
+// menu font gives every syllable and every space a full 8x8 tile, which makes
+// word gaps 8px wide and allows centering only in 8px steps. The name row is
+// re-rendered into kHudKoNameTiles using each glyph's real ink width, a
+// narrower word gap, and exact centering. Those tiles are only ever used by
+// item names, whose glyphs are read from the Korean HUD sheets instead.
+enum {
+  kHudKoGlyphGap = 1,    // px between syllables
+  kHudKoSpaceWidth = 3,  // extra px for a space between words
+};
+static const uint16 kHudKoNameTiles[8] = {
+  0x17e, 0x012, 0x15e, 0x170, 0x16f, 0x162, 0x01f, 0x177,
+};
+static uint8 (*g_hud_ko_tiles)[8][8];  // 384 decoded HUD tiles, colour 0-3
+
+static bool Hud_KoEnsureTiles(void) {
+  if (g_hud_ko_tiles)
+    return true;
+  static const uint8 kSheets[3] = { 0x6a, 0x6b, 0x69 };
+  uint8 (*tiles)[8][8] = malloc(384 * 64);
+  uint8 *raw = malloc(0x1000);
+  if (!tiles || !raw) {
+    free(tiles);
+    free(raw);
+    return false;
+  }
+  for (int s = 0; s < 3; s++) {
+    Decompress(raw, kSprGfx(kSheets[s]).ptr);
+    for (int t = 0; t < 128; t++)
+      for (int y = 0; y < 8; y++) {
+        uint8 b0 = raw[t * 16 + y * 2], b1 = raw[t * 16 + y * 2 + 1];
+        for (int x = 0; x < 8; x++)
+          tiles[s * 128 + t][y][x] = ((b0 >> (7 - x)) & 1) | (((b1 >> (7 - x)) & 1) << 1);
+      }
+  }
+  free(raw);
+  g_hud_ko_tiles = tiles;
+  return true;
+}
+
+// src: 16 tilemap words (top row, then the name row). Returns false to fall
+// back to drawing src unchanged.
+static bool Hud_KoLayoutName(const uint16 *src, uint16 *out) {
+  if (!(g_zenv.dialogue_flags & kDialogueFlag_Korean) || !Hud_KoEnsureTiles())
+    return false;
+  const uint16 *row = src + 8;
+  int first = -1, last = -1;
+  for (int i = 0; i < 8; i++)
+    if ((row[i] & 0x3ff) != 0xf5) {
+      if (first < 0) first = i;
+      last = i;
+    }
+  if (first < 0)
+    return false;
+  for (int i = first; i <= last; i++) {
+    int t = row[i] & 0x3ff;
+    if (t != 0xf5 && (t >= 384 || (row[i] & 0xc000)))
+      return false;  // not a plain glyph tile
+  }
+  // Measure.
+  int lo[8], hi[8], width = 0;
+  bool prev_space = false;
+  for (int i = first; i <= last; i++) {
+    int t = row[i] & 0x3ff;
+    if (t == 0xf5) {
+      if (!prev_space) width += kHudKoSpaceWidth;
+      prev_space = true;
+      continue;
+    }
+    prev_space = false;
+    lo[i] = 8, hi[i] = -1;
+    for (int y = 0; y < 8; y++)
+      for (int x = 0; x < 8; x++)
+        if (g_hud_ko_tiles[t][y][x] == 2) {
+          if (x < lo[i]) lo[i] = x;
+          if (x > hi[i]) hi[i] = x;
+        }
+    if (hi[i] < 0) { lo[i] = 0; hi[i] = 3; }  // blank glyph: keep a small gap
+    width += hi[i] - lo[i] + 1 + kHudKoGlyphGap;
+  }
+  width -= kHudKoGlyphGap;
+  if (width > 64)
+    return false;
+  // Render into a 64x8 strip (colour 3 = background, 2 = ink).
+  uint8 strip[8][64];
+  memset(strip, 3, sizeof(strip));
+  int x = (64 - width) / 2;
+  prev_space = false;
+  for (int i = first; i <= last; i++) {
+    int t = row[i] & 0x3ff;
+    if (t == 0xf5) {
+      if (!prev_space) x += kHudKoSpaceWidth;
+      prev_space = true;
+      continue;
+    }
+    prev_space = false;
+    for (int y = 0; y < 8; y++)
+      for (int gx = lo[i]; gx <= hi[i]; gx++)
+        if (g_hud_ko_tiles[t][y][gx] == 2)
+          strip[y][x + gx - lo[i]] = 2;
+    x += hi[i] - lo[i] + 1 + kHudKoGlyphGap;
+  }
+  // Upload the 8 tiles (2bpp: plane 0 in the low byte, plane 1 in the high).
+  uint16 attr = row[first] & 0xfc00;
+  for (int k = 0; k < 8; k++) {
+    uint16 *dst = &g_zenv.vram[0x7000 + kHudKoNameTiles[k] * 8];
+    for (int y = 0; y < 8; y++) {
+      uint8 b0 = 0, b1 = 0;
+      for (int px = 0; px < 8; px++) {
+        uint8 v = strip[y][k * 8 + px];
+        b0 |= (v & 1) << (7 - px);
+        b1 |= ((v >> 1) & 1) << (7 - px);
+      }
+      dst[y] = b0 | b1 << 8;
+    }
+    out[k] = src[k];
+    out[8 + k] = attr | kHudKoNameTiles[k];
+  }
+  return true;
+}
+
 void Hud_DrawSelectedYButtonItem() {  // 8deb3a
 
 #define L(x) (x == ' ' ? 0x24f5 : 0x2550 + x - 'A')
@@ -1292,6 +1415,9 @@ void Hud_DrawSelectedYButtonItem() {  // 8deb3a
   } else {
     src_p = &kHudItemText[(item - 1) * 16];
   }
+  uint16 ko_name[16];
+  if (Hud_KoLayoutName(src_p, ko_name))
+    src_p = ko_name;
   Hud_DrawNxN(dst_box + HUDXY(22, 8), src_p, 8, 2);
 }
 
