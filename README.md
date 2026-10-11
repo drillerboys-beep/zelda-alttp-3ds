@@ -1,5 +1,11 @@
 # Zelda A Link to the Past 3DS
 
+> **한국어판 (Korean build)** — 이 포크는 싸이제로님의 SFC 한글패치 롬을 3DS 포팅판에서 실행할 수 있게 한 한국어판입니다.
+> 받기: [Releases](../../releases/latest) · 설치 방법과 감사의 말: [docs/KOREAN.md](docs/KOREAN.md)
+>
+> 한글패치를 만들어 주신 **싸이제로**님, 3DS 포팅판을 만든 **EstebanPdN**님과 함께하신 개발자 여러분, Zelda3 엔진의 **snesrev**님께 깊은 존경과 감사를 드립니다.
+
+
 <img width="1672" height="941" alt="alttp" src="https://github.com/user-attachments/assets/6fc340f1-7d18-4e75-9a1a-bf8986d490dc" />
 
 Nintendo 3DS dual-screen port of Zelda3, built with help from Codex.
