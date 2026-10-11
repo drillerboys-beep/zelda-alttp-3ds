@@ -5,6 +5,7 @@
 #include "nmi.h"
 #include "poly.h"
 #include "attract.h"
+#include "hud.h"
 #include "snes/ppu.h"
 #include "snes/snes_regs.h"
 #include "snes/dma.h"
@@ -1758,6 +1759,11 @@ void ZeldaSetLanguage(const char *language) {
   g_zenv.dialogue_blk = kDialogue(found.ptr[0]);
   g_zenv.dialogue_font_blk = kDialogueFont(found.ptr[1]);
   g_zenv.dialogue_flags = found.ptr[2];
+  // Korean: the font block's third part patches the menu item-name tilemaps.
+  MemBlk hud_patch = { 0, 0 };
+  if (g_zenv.dialogue_flags & kDialogueFlag_Korean)
+    hud_patch = FindIndexInMemblk(g_zenv.dialogue_font_blk, 2);
+  Hud_ApplyTextTablePatch(hud_patch.ptr, hud_patch.size);
 }
 
 

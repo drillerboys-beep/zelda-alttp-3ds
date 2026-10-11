@@ -10,7 +10,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#define UPDATE_DIR "sdmc:/3ds/Zelda 3DS/update"
+#define UPDATE_DIR ZELDA3_SD_DIR "/update"
 #define UPDATE_PART UPDATE_DIR "/download.part"
 #define CHANNEL_FILE UPDATE_DIR "/channel.txt"
 #define UPDATE_IO_SIZE (128u * 1024u)
@@ -276,6 +276,12 @@ done:
 }
 static void start(bool downloading) {
   if (!initialized || Updater_Busy()) return;
+#ifdef ZELDA3_KOREAN_BUILD
+  // The Korean build is a separate title; upstream releases would replace it.
+  (void)downloading;
+  publish(UPDATE_CURRENT, "UPDATES OFF IN KOREAN BUILD");
+  return;
+#endif
   if (worker) { threadJoin(worker, UINT64_MAX); threadFree(worker); worker = NULL; }
   if (downloading) { UpdateStatus s; Updater_GetStatus(&s); if (s.state != UPDATE_AVAILABLE) return; }
   if (!downloading) { LightLock_Lock(&lock); status.version[0] = 0; LightLock_Unlock(&lock); }

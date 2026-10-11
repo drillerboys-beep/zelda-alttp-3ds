@@ -58,9 +58,24 @@ target_include_directories(zelda3-3ds PRIVATE
   "${CMAKE_CURRENT_LIST_DIR}/source"
 )
 
+option(ZELDA3_KOREAN_BUILD "Separate Korean build: own SD folder, updater off" OFF)
+if(ZELDA3_KOREAN_BUILD)
+  set(ZELDA3_SD_DIR_VALUE "sdmc:/3ds/Zelda 3DS KR")
+  set(ZELDA3_VERSION_VALUE "3.2-KR1")
+  set(ZELDA3_SMDH_NAME "Zelda ALttP 3DS (Korean)")
+  set(ZELDA3_3DSX_NAME "zelda3-3ds-kr-v3.2-KR1.3dsx")
+else()
+  set(ZELDA3_SD_DIR_VALUE "sdmc:/3ds/Zelda 3DS")
+  set(ZELDA3_VERSION_VALUE "3.2")
+  set(ZELDA3_SMDH_NAME "The Legend of Zelda")
+  set(ZELDA3_3DSX_NAME "zelda3-3ds-v3.2.3dsx")
+endif()
+
 target_compile_definitions(zelda3-3ds PRIVATE
   SYSTEM_VOLUME_MIXER_AVAILABLE=0
-  ZELDA3_3DS_VERSION=\"3.2\"
+  ZELDA3_3DS_VERSION=\"${ZELDA3_VERSION_VALUE}\"
+  ZELDA3_SD_DIR=\"${ZELDA3_SD_DIR_VALUE}\"
+  $<$<BOOL:${ZELDA3_KOREAN_BUILD}>:ZELDA3_KOREAN_BUILD=1>
   NDEBUG=1
 )
 
@@ -114,7 +129,7 @@ configure_file("${CMAKE_CURRENT_LIST_DIR}/romfs/update-ca.pem" "${ZELDA3_ROMFS}/
 set(ZELDA3_SMDH "${CMAKE_CURRENT_BINARY_DIR}/zelda3-3ds.smdh")
 ctr_generate_smdh(
   OUTPUT "${ZELDA3_SMDH}"
-  NAME "The Legend of Zelda"
+  NAME "${ZELDA3_SMDH_NAME}"
   DESCRIPTION "A Link to the Past 3DS port"
   AUTHOR "EstebanPdN"
   ICON "${CMAKE_CURRENT_LIST_DIR}/assets/icon.png"
@@ -122,7 +137,7 @@ ctr_generate_smdh(
 
 ctr_create_3dsx(zelda3-3ds-3dsx
   TARGET zelda3-3ds
-  OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/zelda3-3ds-v3.2.3dsx"
+  OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/${ZELDA3_3DSX_NAME}"
   SMDH "${ZELDA3_SMDH}"
   ROMFS "${ZELDA3_ROMFS}"
 )

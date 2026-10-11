@@ -2515,6 +2515,44 @@ void RenderText_Draw_Finish() {  // 8eca35
   main_module_index = saved_module_for_menu;
 }
 
+// Korean dialogue (dialogue_flags & kDialogueFlag_Korean): the font block holds
+// kKoreanFontPages pages of 16x16 glyphs. Bytes 0x5C..0x65 are zero-width letters
+// that select the page used by the following glyphs, and each glyph is two tiles
+// wide (top row, then the bottom row 32 tiles further). This mirrors the renderer
+// of the Korean SNES translation (Psyzero, 2013-01-16), which patched $0E:CAB8.
+enum {
+  kKoreanFontPages = 10,
+  kKoreanFontPageSize = 0x2000,
+  kKoreanPageSelectFirst = 0x5c,
+  kKoreanPageSelectLast = 0x65,
+};
+static uint8 g_korean_font_page;
+
+static void VWF_DrawGlyphHalf(const uint16 *src, int r0, uint16 line_base, int bytes, uint8 width) {
+  uint8 *mbuf = (uint8 *)messaging_buf;
+  for (int i = 0; i != bytes; i += 2) {
+    uint16 r4 = *src++;
+    int y = r0 + line_base;
+    int x = (y & 0xff0) + i;
+    y = (y >> 1) & 7;
+    uint8 r3 = width;
+    do {
+      if (r4 & 0x0080)
+        mbuf[x + 0] ^= kVWF_RenderCharacter_setMasks[y];
+      else
+        mbuf[x + 0] &= ~kVWF_RenderCharacter_setMasks[y];
+      if (r4 & 0x8000)
+        mbuf[x + 1] ^= kVWF_RenderCharacter_setMasks[y];
+      else
+        mbuf[x + 1] &= ~kVWF_RenderCharacter_setMasks[y];
+      r4 = (r4 & ~0x8080) << 1;
+    } while (--r3 && ++y != 8);
+    x += 16;
+    if (r4 != 0)
+      WORD(mbuf[x + 0]) = r4;
+  }
+}
+
 void VWF_RenderSingle(int c) {  // 8ecab8
   if (c != 0x59)
     sound_effect_2 = 12;
@@ -2525,64 +2563,32 @@ void VWF_RenderSingle(int c) {  // 8ecab8
     vwf_var1 = kVWF_RenderCharacter_linePositions[vwf_curline>>1];
     vwf_flag_next_line = 0;
   }
-  
+
+  bool korean = (g_zenv.dialogue_flags & kDialogueFlag_Korean) != 0;
   const uint8 *kFontData = FindIndexInMemblk(g_zenv.dialogue_font_blk, 0).ptr;
   uint8 width = FindIndexInMemblk(g_zenv.dialogue_font_blk, 1).ptr[c];
-  assert(width <= 8);
 
   int i = vwf_var1++;
   uint8 arrval = vwf_arr[i];
   vwf_arr[i + 1] = arrval + width;
   uint16 r10 = (c & 0x70) * 2 + (c & 0xf);
   uint16 r0 = arrval * 2;
-  const uint16 *src2 = (uint16*)(kFontData + r10 * 16);
-  uint8 *mbuf = (uint8 *)messaging_buf;
-  for (int i = 0; i != 16; i += 2) {
-    uint16 r4 = *src2++;
-    int y = r0 + vwf_line_ptr;
-    int x = (y & 0xff0) + i;
-    y = (y >> 1) & 7;
-    uint8 r3 = width;
-    do {
-      if (r4 & 0x0080)
-        mbuf[x + 0] ^= kVWF_RenderCharacter_setMasks[y];
-      else
-        mbuf[x + 0] &= ~kVWF_RenderCharacter_setMasks[y];
-      if (r4 & 0x8000)
-        mbuf[x + 1] ^= kVWF_RenderCharacter_setMasks[y];
-      else
-        mbuf[x + 1] &= ~kVWF_RenderCharacter_setMasks[y];
-      r4 = (r4 & ~0x8080) << 1;
-      //r4 <<= 1;
-    } while (--r3 && ++y != 8);
-    x += 16;
-    if (r4 != 0)
-      WORD(mbuf[x + 0]) = r4;
+
+  if (korean) {
+    if (c >= kKoreanPageSelectFirst && c <= kKoreanPageSelectLast) {
+      g_korean_font_page = c - kKoreanPageSelectFirst;
+      return;
+    }
+    const uint8 *page = kFontData + (g_korean_font_page % kKoreanFontPages) * kKoreanFontPageSize;
+    const uint16 *top = (const uint16 *)(page + r10 * 32);
+    VWF_DrawGlyphHalf(top, r0, vwf_line_ptr, 32, width);
+    VWF_DrawGlyphHalf((const uint16 *)((const uint8 *)top + 0x200), r0, vwf_line_ptr + 0x150, 32, width);
+    return;
   }
-  uint16 r8 = vwf_line_ptr + 0x150;
-  const uint16 *src3 = (uint16*)(kFontData + (r10 + 16) * 16);
-  for (int i = 0; i != 16; i += 2) {
-    uint16 r4 = *src3++;
-    int y = r8 + r0;
-    int x = (y & 0xff0) + i;
-    y = (y >> 1) & 7;
-    uint8 r3 = width;
-    do {
-      if (r4 & 0x0080)
-        mbuf[x + 0] ^= kVWF_RenderCharacter_setMasks[y];
-      else
-        mbuf[x + 0] &= ~kVWF_RenderCharacter_setMasks[y];
-      if (r4 & 0x8000)
-        mbuf[x + 1] ^= kVWF_RenderCharacter_setMasks[y];
-      else
-        mbuf[x + 1] &= ~kVWF_RenderCharacter_setMasks[y];
-      //r4 <<= 1;
-      r4 = (r4 & ~0x8080) << 1;
-    } while (--r3 && ++y != 8);
-    x += 16;
-    if (r4 != 0)
-      WORD(mbuf[x + 0]) = r4;
-  }
+
+  assert(width <= 8);
+  VWF_DrawGlyphHalf((const uint16 *)(kFontData + r10 * 16), r0, vwf_line_ptr, 16, width);
+  VWF_DrawGlyphHalf((const uint16 *)(kFontData + (r10 + 16) * 16), r0, vwf_line_ptr + 0x150, 16, width);
 }
 
 void RenderText_Draw_Choose2LowOr3() {  // 8ecd1a

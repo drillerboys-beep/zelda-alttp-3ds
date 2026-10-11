@@ -33,7 +33,7 @@ static uint32_t *g_update_pixels;
 
 extern void SecondScreenSDL_OpenDeveloperOverlay(void);
 
-static const char kStorageDirectory[] = "sdmc:/3ds/Zelda 3DS";
+static const char kStorageDirectory[] = ZELDA3_SD_DIR;
 static const char kProfilesDirectory[] = "profiles";
 static const char kSelectedRomFile[] = "selected_rom.ini";
 static const char kForceSelectorFile[] = "select-rom.flag";
@@ -555,7 +555,7 @@ bool Platform3DS_TakeQuickDumpRequest(void) {
 
 void Platform3DS_RequestRomSelection(void) {
   Platform3DS_BlankScreens();
-  FILE *file = fopen("sdmc:/3ds/Zelda 3DS/select-rom.flag", "wb");
+  FILE *file = fopen(ZELDA3_SD_DIR "/select-rom.flag", "wb");
   if (file) {
     fputs("1\n", file);
     fclose(file);
@@ -1383,6 +1383,12 @@ static bool CopyFileReplacing(const char *source, const char *destination) {
   }
   return true;
 }
+
+enum {
+  kAssetIndex_SprGfx = 64,
+  kAssetIndex_BgGfx = 65,
+  kAssetIndex_Dialogue = 94,
+};
 
 static bool AssetsBlobLooksValid(const uint8 *data, size_t size) {
   if (size < 88)
@@ -2485,20 +2491,22 @@ static bool RomLooksJapanese(const uint8 *rom, size_t rom_size) {
                 sizeof(kJapaneseTitle) - 1) == 0;
 }
 
-static bool AddTranslatedLanguageToAssets(const uint8 *assets_data,
-                                          size_t assets_size,
-                                          const uint8 *rom,
-                                          size_t rom_size,
-                                          const char *language_code,
-                                          uint8 **out_data,
-                                          size_t *out_size) {
+// Appends a language (dialogue + font block) to an assets blob. Takes
+// ownership of the language blocks. The optional replacement graphics packs
+// (kSprGfx / kBgGfx, may be NULL) are moved into the blob on success (their
+// data pointer is cleared); the caller frees whatever is left.
+static bool AddLanguageBlocksToAssets(const uint8 *assets_data,
+                                      size_t assets_size,
+                                      OwnedBlock language_dialogue,
+                                      OwnedBlock language_font,
+                                      const char *language_code,
+                                      uint8 language_flags,
+                                      OwnedBlock *gfx_spr,
+                                      OwnedBlock *gfx_bg,
+                                      uint8 **out_data,
+                                      size_t *out_size) {
   *out_data = NULL;
   *out_size = 0;
-  OwnedBlock language_dialogue = {0};
-  OwnedBlock language_font = {0};
-  if (!ExtractTranslationLanguage(rom, rom_size,
-                                  &language_dialogue, &language_font))
-    return false;
   if (assets_size < 88) {
     FreeBlocks(&language_dialogue, 1);
     FreeBlocks(&language_font, 1);
@@ -2578,7 +2586,7 @@ static bool AddTranslatedLanguageToAssets(const uint8 *assets_data,
       }
       if (ok)
         memcpy(name, language_code, name_size);
-      uint8 conf[] = { (uint8)index, (uint8)index, 2 };
+      uint8 conf[] = { (uint8)index, (uint8)index, language_flags };
       ok = ok &&
            CopyBlock(&map_parts[0], name, name_size) &&
            CopyBlock(&map_parts[1], conf, sizeof(conf)) &&
@@ -2590,6 +2598,18 @@ static bool AddTranslatedLanguageToAssets(const uint8 *assets_data,
         packed_map_entry.size = 0;
       }
     }
+  }
+  if (ok && gfx_spr && gfx_spr->data) {
+    free(assets[kAssetIndex_SprGfx].data);
+    assets[kAssetIndex_SprGfx] = *gfx_spr;
+    gfx_spr->data = NULL;
+    gfx_spr->size = 0;
+  }
+  if (ok && gfx_bg && gfx_bg->data) {
+    free(assets[kAssetIndex_BgGfx].data);
+    assets[kAssetIndex_BgGfx] = *gfx_bg;
+    gfx_bg->data = NULL;
+    gfx_bg->size = 0;
   }
   OwnedBlock packed_dialogues = {0};
   OwnedBlock packed_fonts = {0};
@@ -2645,6 +2665,26 @@ static bool AddTranslatedLanguageToAssets(const uint8 *assets_data,
   FreeBlocks(assets, asset_count);
   free(assets);
   return ok;
+}
+
+static bool AddTranslatedLanguageToAssets(const uint8 *assets_data,
+                                          size_t assets_size,
+                                          const uint8 *rom,
+                                          size_t rom_size,
+                                          const char *language_code,
+                                          uint8 **out_data,
+                                          size_t *out_size) {
+  OwnedBlock language_dialogue = {0};
+  OwnedBlock language_font = {0};
+  *out_data = NULL;
+  *out_size = 0;
+  if (!ExtractTranslationLanguage(rom, rom_size,
+                                  &language_dialogue, &language_font))
+    return false;
+  return AddLanguageBlocksToAssets(assets_data, assets_size,
+                                   language_dialogue, language_font,
+                                   language_code, 2, NULL, NULL,
+                                   out_data, out_size);
 }
 
 static bool WriteTranslatedProfileIni(const char *language_code) {
@@ -2783,6 +2823,325 @@ static bool TryBuildBaseAssetsFromInstalledUsRom(const uint8 *patch,
   return success;
 }
 
+// ---------------------------------------------------------------------------
+// Korean translation support.
+//
+// Target: the USA ROM with the Korean translation by Psyzero (2013-01-16,
+// distributed on hangulogame.com), expanded to 3 MB. Nothing from that
+// translation ships with this port: the text, font, menu graphics and menu
+// tilemaps are read from the user's own patched ROM at first launch, and the
+// rest of the game data comes from the user's clean USA ROM.
+//
+// Layout of the patched ROM (unheadered PC offsets):
+//   0x210000  397 x 3-byte pointers to the messages (banks $44/$45)
+//   0x100000  10 font pages, one every 0x8000 bytes, 16x16 glyphs
+//   0x077000  glyph width table (shared by all pages)
+//   0x004F80  graphics sheet pointer tables (bank / high / low), as in USA
+//   0x06F1C9, 0x06F931  menu item-name tilemaps (same place as in USA)
+// ---------------------------------------------------------------------------
+enum {
+  kKoRomSize = 0x300000,
+  kKoDialoguePtrs = 0x210000,
+  kKoMessageCount = 397,
+  kKoFontBase = 0x100000,
+  kKoFontPages = 10,
+  kKoFontPageStride = 0x8000,
+  kKoFontPageSize = 0x2000,
+  kKoFontWidths = 0x77000,
+  kKoFontWidthsSize = 256,
+  kKoGfxBankTable = 0x4f80,
+  kKoGfxHiTable = 0x505f,
+  kKoGfxLoTable = 0x513e,
+  kKoBgSheets = 115,
+  kKoSprSheets = 108,
+  kKoSprRawSheets = 12,
+  kKoSprRawSheetSize = 0x600,
+  kKoLanguageFlags = 2 | 4,  // translated + Korean font (kDialogueFlag_Korean)
+};
+// CRC-32 of the 3 MB image with the header checksum (0x7FDC..0x7FDF) zeroed,
+// so both a freshly patched ROM and copies with a fixed checksum are accepted.
+static const uint32 kKoRomCrc = 0xad9ec76a;
+static const uint8 kKoRendererSignature[] = {
+  0x00, 0x80, 0x42, 0x85, 0x04, 0xbf, 0x02, 0x80, 0x42,  // at 0x744ED
+};
+static const struct { uint32 offset, size; } kKoHudRegions[] = {
+  { 0x6f1c9, 0x460 },
+  { 0x6f931, 0x0c8 },
+};
+static const char kKoLanguageCode[] = "ko";
+
+static uint32 KoCrc32SkipChecksum(const uint8 *data, size_t size) {
+  uint32 crc = 0xffffffff;
+  for (size_t i = 0; i < size; i++) {
+    uint8 b = (i >= 0x7fdc && i < 0x7fe0) ? 0 : data[i];
+    crc ^= b;
+    for (int k = 0; k < 8; k++)
+      crc = (crc >> 1) ^ ((crc & 1) * 0xEDB88320u);
+  }
+  return crc ^ 0xffffffff;
+}
+
+static bool RomLooksKoreanZelda(const uint8 *rom, size_t rom_size) {
+  static const char kTitle[] = "THE LEGEND OF ZELDA";
+  return rom && rom_size == kKoRomSize &&
+         memcmp(rom + 0x7fc0, kTitle, sizeof(kTitle) - 1) == 0 &&
+         memcmp(rom + 0x744ed, kKoRendererSignature,
+                sizeof(kKoRendererSignature)) == 0;
+}
+
+static size_t KoSnesToPc(uint8 bank, uint16 addr) {
+  return ((size_t)(bank & 0x7f) << 15) | (addr & 0x7fff);
+}
+
+static size_t KoSheetOffset(const uint8 *rom, int sheet) {
+  return KoSnesToPc(rom[kKoGfxBankTable + sheet],
+                    rom[kKoGfxHiTable + sheet] << 8 | rom[kKoGfxLoTable + sheet]);
+}
+
+// Length of one compressed graphics stream, including the 0xFF terminator.
+static size_t KoCompressedLength(const uint8 *rom, size_t rom_size, size_t p) {
+  size_t start = p;
+  while (p < rom_size) {
+    uint8 b = rom[p++];
+    if (b == 0xff)
+      return p - start;
+    uint32 cmd, len;
+    if ((b & 0xe0) == 0xe0) {
+      if (p >= rom_size)
+        return 0;
+      cmd = (b >> 2) & 7;
+      len = (((b & 3) << 8) | rom[p++]) + 1;
+    } else {
+      cmd = b >> 5;
+      len = (b & 0x1f) + 1;
+    }
+    p += (cmd == 0) ? len : (cmd == 1 || cmd == 3) ? 1 : 2;
+  }
+  return 0;
+}
+
+static bool KoBuildGraphics(const uint8 *rom, size_t rom_size,
+                            OwnedBlock *spr_out, OwnedBlock *bg_out) {
+  OwnedBlock bg[kKoBgSheets] = {0};
+  OwnedBlock spr[kKoSprSheets] = {0};
+  bool ok = true;
+  for (int i = 0; ok && i < kKoBgSheets; i++) {
+    size_t p = KoSheetOffset(rom, i);
+    size_t len = p < rom_size ? KoCompressedLength(rom, rom_size, p) : 0;
+    ok = len != 0 && CopyBlock(&bg[i], rom + p, len);
+  }
+  for (int i = 0; ok && i < kKoSprSheets; i++) {
+    size_t p = KoSheetOffset(rom, kKoBgSheets + i);
+    size_t len = i < kKoSprRawSheets ? kKoSprRawSheetSize :
+        (p < rom_size ? KoCompressedLength(rom, rom_size, p) : 0);
+    ok = len != 0 && p + len <= rom_size && CopyBlock(&spr[i], rom + p, len);
+  }
+  ok = ok && PackBlocks(spr, kKoSprSheets, spr_out) &&
+       PackBlocks(bg, kKoBgSheets, bg_out);
+  FreeBlocks(bg, kKoBgSheets);
+  FreeBlocks(spr, kKoSprSheets);
+  return ok;
+}
+
+// Dialogue block: the USA dictionary (the Korean text still uses its first
+// few space entries) followed by the 397 Korean messages.
+static bool KoBuildDialogue(const uint8 *rom, size_t rom_size,
+                            const uint8 *base_assets, size_t base_assets_size,
+                            OwnedBlock *dialogue_out) {
+  static const uint8 kCommandArgBytes[] = {
+    0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0,
+  };
+  OwnedBlock *languages = NULL, *base_parts = NULL;
+  int language_count = 0, base_part_count = 0;
+  OwnedBlock parts[2] = {0};
+  OwnedBlock messages[kKoMessageCount] = {0};
+  bool ok = false;
+
+  // Locate asset 94 (kDialogue) in the base blob.
+  uint32 asset_count = ReadU32LE(base_assets + 80);
+  uint32 names_size = ReadU32LE(base_assets + 84);
+  size_t offset = 88 + asset_count * 4 + names_size;
+  const uint8 *dialogue_asset = NULL;
+  size_t dialogue_asset_size = 0;
+  for (uint32 i = 0; i < asset_count; i++) {
+    uint32 size = ReadU32LE(base_assets + 88 + i * 4);
+    offset = (offset + 3) & ~3;
+    if (offset + size > base_assets_size)
+      return false;
+    if (i == kAssetIndex_Dialogue) {
+      dialogue_asset = base_assets + offset;
+      dialogue_asset_size = size;
+    }
+    offset += size;
+  }
+  if (!dialogue_asset ||
+      !UnpackBlocks(dialogue_asset, dialogue_asset_size, &languages, &language_count) ||
+      language_count < 1 ||
+      !UnpackBlocks(languages[0].data, languages[0].size, &base_parts, &base_part_count) ||
+      base_part_count != 2)
+    goto done;
+
+  for (int m = 0; m < kKoMessageCount; m++) {
+    size_t entry = kKoDialoguePtrs + m * 3;
+    size_t p = KoSnesToPc(rom[entry + 2], rom[entry] | rom[entry + 1] << 8);
+    size_t start = p;
+    for (;;) {
+      if (p >= rom_size || p - start > 0x1000)
+        goto done;
+      uint8 c = rom[p];
+      if (c == 0x7f)
+        break;
+      p += 1 + ((c >= 0x67 && c < 0x80) ? kCommandArgBytes[c - 0x67] : 0);
+    }
+    if (!CopyBlock(&messages[m], rom + start, p - start))
+      goto done;
+  }
+  parts[0] = base_parts[0];
+  base_parts[0].data = NULL;
+  ok = PackBlocks(messages, kKoMessageCount, &parts[1]) &&
+       PackBlocks(parts, 2, dialogue_out);
+
+done:
+  FreeBlocks(messages, kKoMessageCount);
+  FreeBlocks(parts, 2);
+  if (base_parts)
+    FreeBlocks(base_parts, base_part_count);
+  free(base_parts);
+  if (languages)
+    FreeBlocks(languages, language_count);
+  free(languages);
+  return ok;
+}
+
+// Font block: [font pages][glyph widths][menu tilemap patch records].
+static bool KoBuildFont(const uint8 *rom, size_t rom_size, OwnedBlock *font_out) {
+  OwnedBlock parts[3] = {0};
+  bool ok = true;
+  size_t hud_size = 0;
+  for (size_t i = 0; i < countof(kKoHudRegions); i++)
+    hud_size += 6 + kKoHudRegions[i].size;
+  parts[0].data = malloc(kKoFontPages * kKoFontPageSize);
+  parts[2].data = malloc(hud_size);
+  if (!parts[0].data || !parts[2].data) {
+    ok = false;
+  } else {
+    parts[0].size = kKoFontPages * kKoFontPageSize;
+    for (int i = 0; i < kKoFontPages; i++)
+      memcpy(parts[0].data + i * kKoFontPageSize,
+             rom + kKoFontBase + i * kKoFontPageStride, kKoFontPageSize);
+    uint8 *w = parts[2].data;
+    for (size_t i = 0; i < countof(kKoHudRegions); i++) {
+      uint32 offs = kKoHudRegions[i].offset, size = kKoHudRegions[i].size;
+      w[0] = offs, w[1] = offs >> 8, w[2] = offs >> 16, w[3] = offs >> 24;
+      w[4] = size, w[5] = size >> 8;
+      memcpy(w + 6, rom + offs, size);
+      w += 6 + size;
+    }
+    parts[2].size = hud_size;
+    ok = CopyBlock(&parts[1], rom + kKoFontWidths, kKoFontWidthsSize) &&
+         PackBlocks(parts, 3, font_out);
+  }
+  FreeBlocks(parts, 3);
+  (void)rom_size;
+  return ok;
+}
+
+// Base assets strictly from a clean USA ROM in the ROM folder (the CRC-checked
+// BPS path only, so the Korean ROM itself can never be used as the base).
+static bool KoBuildBaseAssets(const uint8 *patch, size_t patch_size,
+                              uint8 **assets_out, size_t *assets_size_out) {
+  *assets_out = NULL;
+  *assets_size_out = 0;
+  DIR *directory = opendir("../..");
+  if (!directory)
+    return false;
+  struct dirent *entry;
+  while (!*assets_out && (entry = readdir(directory)) != NULL) {
+    if (RomFileShouldBeIgnored(entry->d_name) ||
+        !(HasExtension(entry->d_name, ".sfc") ||
+          HasExtension(entry->d_name, ".smc")))
+      continue;
+    char path[640];
+    snprintf(path, sizeof(path), "../../%s", entry->d_name);
+    if (!IsRegularFile(path))
+      continue;
+    size_t base_size = 0;
+    uint8 *base_rom = ReadWholeFile(path, &base_size);
+    if (!base_rom)
+      continue;
+    base_rom = NormalizeRomForExtraction(base_rom, &base_size);
+    size_t size = 0;
+    uint8 *assets = base_size == 1048576 ?
+        ApplyBps(base_rom, base_size, patch, patch_size, &size) : NULL;
+    free(base_rom);
+    if (assets && AssetsBlobLooksValid(assets, size)) {
+      *assets_out = assets;
+      *assets_size_out = size;
+      LogSetup("Korean: base assets from clean USA ROM: %s", entry->d_name);
+    } else {
+      free(assets);
+    }
+  }
+  closedir(directory);
+  return *assets_out != NULL;
+}
+
+static bool TryBuildKoreanAssets(const uint8 *rom, size_t rom_size,
+                                 const uint8 *patch, size_t patch_size,
+                                 uint8 **assets_out, size_t *assets_size_out,
+                                 const char **error_out) {
+  *assets_out = NULL;
+  *assets_size_out = 0;
+  *error_out = NULL;
+  uint32 crc = KoCrc32SkipChecksum(rom, rom_size);
+  LogSetup("Korean ROM detected, CRC %08lx", (unsigned long)crc);
+  if (crc != kKoRomCrc) {
+    *error_out =
+      "This Korean ROM is not the supported version.\n"
+      "Use the USA ROM patched with the Korean\n"
+      "translation (2013-01-16).";
+    return false;
+  }
+  uint8 *base = NULL;
+  size_t base_size = 0;
+  if (!KoBuildBaseAssets(patch, patch_size, &base, &base_size)) {
+    *error_out =
+      "Korean ROM found, but the clean USA ROM is missing.\n"
+      "Put the original USA ROM (unpatched) in\n"
+      ZELDA3_SD_DIR "/ next to the Korean ROM.";
+    return false;
+  }
+  OwnedBlock dialogue = {0}, font = {0}, spr = {0}, bg = {0};
+  bool ok = KoBuildDialogue(rom, rom_size, base, base_size, &dialogue) &&
+            KoBuildFont(rom, rom_size, &font) &&
+            KoBuildGraphics(rom, rom_size, &spr, &bg);
+  LogSetup("Korean: dialogue %lu, font %lu, spr %lu, bg %lu bytes",
+           (unsigned long)dialogue.size, (unsigned long)font.size,
+           (unsigned long)spr.size, (unsigned long)bg.size);
+  if (ok) {
+    ok = AddLanguageBlocksToAssets(base, base_size, dialogue, font,
+                                   kKoLanguageCode, kKoLanguageFlags,
+                                   &spr, &bg, assets_out, assets_size_out);
+  } else {
+    FreeBlocks(&dialogue, 1);
+    FreeBlocks(&font, 1);
+  }
+  FreeBlocks(&spr, 1);
+  FreeBlocks(&bg, 1);
+  free(base);
+  if (ok && !AssetsBlobLooksValid(*assets_out, *assets_size_out)) {
+    free(*assets_out);
+    *assets_out = NULL;
+    *assets_size_out = 0;
+    ok = false;
+  }
+  if (ok)
+    WriteTranslatedProfileIni(kKoLanguageCode);
+  else if (!*error_out)
+    *error_out = "Could not read the Korean data from the ROM.";
+  return ok;
+}
+
 static const char *g_profile_prepare_status = "ROM preparation failed";
 
 static bool ProfileSetupFailure(const char *status, const char *path) {
@@ -2817,6 +3176,32 @@ static bool ExtractAssetsFromRom(const char *rom_path) {
     ProfileSetupFailure("SD read error", rom_path);
     ShowFatalSetupError(error);
     return false;
+  }
+
+  if (RomLooksKoreanZelda(rom, rom_size)) {
+    uint8 *ko_assets = NULL;
+    const char *ko_error = NULL;
+    bool ko_ok = TryBuildKoreanAssets(rom, rom_size, patch, patch_size,
+                                      &ko_assets, &assets_size, &ko_error);
+    free(rom);
+    free(patch);
+    if (!ko_ok) {
+      g_profile_prepare_status = "Incompatible ROM";
+      LogSetup("Korean extraction failed: %s", ko_error ? ko_error : "?");
+      ShowFatalSetupError(ko_error ? ko_error : "Korean extraction failed.");
+      return false;
+    }
+    bool ko_written = WriteAssetsFile(ko_assets, assets_size);
+    free(ko_assets);
+    if (!ko_written || !AssetsFileLooksValid(kAssetsFilename)) {
+      ProfileSetupFailure("SD assets write error", kAssetsFilename);
+      ShowFatalSetupError(
+        "Error saving zelda3_assets.dat.\n"
+        "Check free space and the SD card.");
+      return false;
+    }
+    LogSetup("Korean assets extracted and validated");
+    return true;
   }
 
   LogSetup("Applying BPS patch");
@@ -3147,7 +3532,7 @@ static int SelectRom(RomEntry *roms, int rom_count, const char *status) {
   if (rom_count <= 0) {
     ShowFatalSetupError(
       "No .sfc or .smc ROMs found in\n"
-      "sdmc:/3ds/Zelda 3DS/");
+      ZELDA3_SD_DIR "/");
     return -1;
   }
   int selected = 0;

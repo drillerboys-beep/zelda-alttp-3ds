@@ -18,6 +18,7 @@ enum kHudItems {
 };
 
 void Hud_RefreshIcon();
+void Hud_ApplyTextTablePatch(const uint8 *data, size_t size);
 uint8 CheckPalaceItemPosession();
 void Hud_FloorIndicator();
 void Hud_RemoveSuperBombIndicator();

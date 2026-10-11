@@ -17,6 +17,12 @@
 struct Snes;
 struct Dsp;
 
+enum {
+  kDialogueFlag_EU = 1,
+  kDialogueFlag_Translated = 2,
+  kDialogueFlag_Korean = 4,
+};
+
 typedef struct ZeldaEnv {
   uint8 *ram;
   uint8 *sram;
@@ -27,7 +33,7 @@ typedef struct ZeldaEnv {
   
   MemBlk dialogue_blk;
   MemBlk dialogue_font_blk;
-  uint8 dialogue_flags;
+  uint8 dialogue_flags;  // bit0: EU text encoding, bit2: Korean font (kDialogueFlag_Korean)
 } ZeldaEnv;
 extern ZeldaEnv g_zenv;
 extern int frame_ctr_dbg;
