@@ -643,12 +643,7 @@ static float tiny_text_width(const char *s, float sc) {
   return w;
 }
 
-static void draw_tiny_text(const char *s, float x, float y, float sc, uint32_t c) {
-  const char *ko = ss_ko_text(s);
-  if (ko) {
-    ss_ko_draw(ko, x, y + 3.5f * sc, 7 * sc, c);
-    return;
-  }
+static void draw_tiny_text_en(const char *s, float x, float y, float sc, uint32_t c) {
   float cx = floorf(x + 0.5f);
   float cy = floorf(y + 0.5f);
   for (; *s; s++) {
@@ -663,9 +658,19 @@ static void draw_tiny_text(const char *s, float x, float y, float sc, uint32_t c
   }
 }
 
+static void draw_tiny_text(const char *s, float x, float y, float sc, uint32_t c) {
+  const char *ko = ss_ko_text(s);
+  if (ko) {
+    ss_ko_draw(ko, x, y + 3.5f * sc, 7 * sc, c);
+    return;
+  }
+  draw_tiny_text_en(s, x, y, sc, c);
+}
+
+// Block text is only used by the developer readouts, which stay in English.
 static void draw_block_text(const char *s, float x, float y, float sc,
                             uint32_t color) {
-  draw_tiny_text(s, floorf(x + 0.5f), floorf(y + 0.5f), floorf(sc + 0.5f),
+  draw_tiny_text_en(s, floorf(x + 0.5f), floorf(y + 0.5f), floorf(sc + 0.5f),
                  color);
 }
 
@@ -1462,7 +1467,11 @@ static const char *wide_zoom_label(void) {
 }
 
 static void draw_screen_panel(RectFS r) {
-  screen_back_r = (RectFS){r.x + 20 * u, r.y + 12 * u, 90 * u, 38 * u};
+  // BACK lines up with the left edge of the option rows below and sits
+  // midway between the frame and the first row (rows start at r.y + 82u).
+  float back_h = 38 * u;
+  float back_cy = (r.y + 9 * u + r.y + 82 * u) * 0.5f;
+  screen_back_r = (RectFS){r.x + 28 * u, floorf(back_cy - back_h * 0.5f + 0.5f), 90 * u, back_h};
   float title_x = r.x + r.w / 2 - text_width("SCREEN", 3 * u) / 2;
   // Korean: on the same centre line as the BACK button beside it.
   if (!ko_text_center("SCREEN", title_x, screen_back_r.y + screen_back_r.h / 2,
@@ -1772,7 +1781,8 @@ static void draw_cinema_settings_overlay(void) {
   RectFS r = {10 * u, 10 * u, W - 20 * u, H - 20 * u};
   draw_settings(r);
   if (!screen_mode && !remap_mode && !developer_mode && !update_mode) {
-    cinema_back_r = (RectFS){r.x + 20 * u, r.y + 12 * u, 90 * u, 38 * u};
+    // Left edge in line with the settings rows (r.x + 28u).
+    cinema_back_r = (RectFS){r.x + 28 * u, r.y + 12 * u, 90 * u, 38 * u};
     draw_settings_row(&cinema_back_r, false);
     draw_text("BACK",
               cinema_back_r.x + cinema_back_r.w / 2 -

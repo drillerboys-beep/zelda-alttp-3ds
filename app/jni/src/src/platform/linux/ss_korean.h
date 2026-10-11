@@ -116,7 +116,7 @@ static const SSKoText kSSKoText[] = {
   {"TURTLE ROCK", "거북 바위"},
   {"GANONS TOWER", "가논의 탑"},
   {"SETTINGS", "설정"},
-  {"SCREEN", "화면"},
+  {"SCREEN", "화면 설정"},
   {"TURBO SPEED", "터보 속도"},
   {"RESTART", "다시 시작"},
   {"BACK", "뒤로"},
