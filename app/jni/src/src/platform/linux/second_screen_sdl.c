@@ -383,10 +383,17 @@ static bool tex_ko_failed;
 // Ink extents per glyph (columns of colour 2), measured when the atlas is built.
 static int8_t ss_ko_lo[sizeof(kSSKoGlyphs) / sizeof(kSSKoGlyphs[0])];
 static int8_t ss_ko_hi[sizeof(kSSKoGlyphs) / sizeof(kSSKoGlyphs[0])];
+static int8_t ss_ko_top[sizeof(kSSKoGlyphs) / sizeof(kSSKoGlyphs[0])];
+static int8_t ss_ko_bot[sizeof(kSSKoGlyphs) / sizeof(kSSKoGlyphs[0])];
 static bool ss_ko_metrics_ready;
 enum {
   kSSKoGlyphGap = 2,  // px between syllables (room for the 1px outlines)
   kSSKoSpace = 4,     // extra px for a space between words (6px word gap)
+  // The syllables share one ink band: rows 2..12 of the 16px cell (a few
+  // vowel-only shapes stop at row 11). Lines are centered on this band, not
+  // per string, so neighbouring labels keep a common baseline.
+  kSSKoInkTop = 2,
+  kSSKoInkRows = 11,
 };
 
 static const char *ss_ko_text(const char *en) {
@@ -470,16 +477,20 @@ static bool ensure_ko_tex(void) {
           img[dy][x] = donor[sy][x];
       }
     }
-    int lo = 16, hi = -1;
+    int lo = 16, hi = -1, top = 16, bot = -1;
     for (int y = 0; y < 16; y++)
       for (int x = 0; x < 16; x++)
         if (img[y][x] == 2) {
           if (x < lo) lo = x;
           if (x > hi) hi = x;
+          if (y < top) top = y;
+          if (y > bot) bot = y;
         }
-    if (hi < 0) { lo = 0; hi = 3; }
+    if (hi < 0) { lo = 0; hi = 3; top = 2; bot = 12; }
     ss_ko_lo[i] = (int8_t)lo;
     ss_ko_hi[i] = (int8_t)hi;
+    ss_ko_top[i] = (int8_t)top;
+    ss_ko_bot[i] = (int8_t)bot;
     int cx = (i % kSSKoCols) * 16, cy = (i / kSSKoCols) * 16;
     for (int y = 0; y < 16; y++)
       for (int x = 0; x < 16; x++)
@@ -526,12 +537,12 @@ static float ss_ko_width(const char *ko, float letter_px) {
   return (float)ss_ko_ink_width(ko) * ss_ko_scale(letter_px);
 }
 
-// center_y: vertical center of the English text line being replaced.
+// center_y: where the middle of the ink band lands (snapped to whole pixels).
 static void ss_ko_draw(const char *ko, float x, float center_y, float letter_px, uint32_t c) {
   if (!ensure_ko_tex())
     return;
   int k = ss_ko_scale(letter_px);
-  float y = floorf(center_y - 7.0f * k + 0.5f);
+  float y = floorf(center_y - (kSSKoInkTop + kSSKoInkRows * 0.5f) * k + 0.5f);
   float cx = floorf(x + 0.5f);
   SDL_SetTextureColorMod(tex_ko, (c >> 16) & 0xff, (c >> 8) & 0xff, c & 0xff);
   uint32_t cp;
@@ -656,6 +667,26 @@ static void draw_block_text(const char *s, float x, float y, float sc,
                             uint32_t color) {
   draw_tiny_text(s, floorf(x + 0.5f), floorf(y + 0.5f), floorf(sc + 0.5f),
                  color);
+}
+
+// Korean ink is ~11px tall, against the 7-8px English letters the layout was
+// drawn around, so Korean titles and labels are placed by their ink band.
+// Both return false when the string has no Korean text (English layout).
+static float ko_ink_height(float letter_px) {
+  return (float)(kSSKoInkRows * ss_ko_scale(letter_px));
+}
+static bool ko_text_center(const char *en, float x, float center_y,
+                           float letter_px, uint32_t c) {
+  const char *ko = ss_ko_text(en);
+  if (!ko)
+    return false;
+  ss_ko_draw(ko, x, center_y, letter_px, c);
+  return true;
+}
+// Middle of the free band between a menu_box's inner top edge and the top of
+// its first content row: where a box title sits with equal space above/below.
+static float box_title_center(RectFS r, float content_top) {
+  return (r.y + 9 * u + content_top) * 0.5f;
 }
 
 static void draw_block_label_value(const char *label, const char *value,
@@ -1008,13 +1039,17 @@ static void draw_dungeon(RectFS r, int link_x, int link_y, int room, int dungeon
 
 static void draw_items(RectFS r) {
   menu_box(r, COL_BOX_BORDER);
-  draw_text("ITEMS", r.x + r.w / 2 - text_width("ITEMS", 3 * u) / 2, r.y + 18 * u, 3 * u);
-
   float cw1 = (r.w - 70 * u) / 5, cw2 = (r.h - 100 * u) / 4;
   float cellW = cw1 < cw2 ? cw1 : cw2;
   grid_cell = cellW;
   grid_x = r.x + r.w / 2 - cellW * 2.5f;
   grid_y = r.y + 40 * u + (r.h - 40 * u - 4 * cellW) / 2;
+
+  float title_x = r.x + r.w / 2 - text_width("ITEMS", 3 * u) / 2;
+  // Korean: centered between the frame and the first row's highlight.
+  if (!ko_text_center("ITEMS", title_x, box_title_center(r, grid_y + 4 * u),
+                      8 * 3 * u, COL(255, 255, 255)))
+    draw_text("ITEMS", title_x, r.y + 18 * u, 3 * u);
 
   int equipped = SS_GetEquippedSlot();
   for (int i = 0; i < 20; i++) {
@@ -1040,8 +1075,7 @@ static void draw_items(RectFS r) {
 
 static void draw_gear(RectFS r) {
   menu_box(r, COL_BOX_BORDER2);
-  draw_tiny_text("GEAR", r.x + r.w / 2 - tiny_text_width("GEAR", 2.0f) / 2,
-                 r.y + 12.0f, 2.0f, COL(250, 250, 250));
+  const uint32_t label_col = COL(250, 250, 250);
 
   int sword = sram8(0x59), shield = sram8(0x5A);
   int gear_cells[7];
@@ -1064,6 +1098,11 @@ static void draw_gear(RectFS r) {
   float y0 = r.y + 30.0f;
   float icon_s = clampf((cell - 5.0f) / 16.0f, 1.25f, 1.75f);
 
+  float title_x = r.x + r.w / 2 - tiny_text_width("GEAR", 2.0f) / 2;
+  // Korean: centered between the frame and the gear slots.
+  if (!ko_text_center("GEAR", title_x, box_title_center(r, y0), 7 * 2.0f, label_col))
+    draw_tiny_text("GEAR", title_x, r.y + 12.0f, 2.0f, label_col);
+
   for (int i = 0; i < 7; i++) {
     float x = x0 + i * (cell + gap);
     float y = y0;
@@ -1076,7 +1115,12 @@ static void draw_gear(RectFS r) {
   float y1 = y0 + cell + 24.0f;
   float bottle_cell = 25.0f;
   float bottle_gap = 7.0f;
-  draw_tiny_text("BOTTLES", x0, y1 - 12.0f, 1.0f, COL(250, 250, 250));
+  // Korean section labels share one line, its ink ending kKoLabelGap px above
+  // the bottle slots, and start at the left edge of their own group.
+  enum { kKoLabelGap = 5 };
+  float label_cy = y1 - kKoLabelGap - ko_ink_height(7.0f) * 0.5f;
+  if (!ko_text_center("BOTTLES", x0, label_cy, 7.0f, label_col))
+    draw_tiny_text("BOTTLES", x0, y1 - 12.0f, 1.0f, label_col);
   for (int i = 0; i < 4; i++) {
     float x = x0 + i * (bottle_cell + bottle_gap);
     slot_bg(x, y1, bottle_cell);
@@ -1090,7 +1134,9 @@ static void draw_gear(RectFS r) {
     }
   }
   float pend_x = r.x + r.w - 108.0f;
-  draw_tiny_text("PENDANTS", pend_x, y1 - 12.0f, 1.0f, COL(250, 250, 250));
+  // First pendant ring: centre pend_x + 13, radius 8.
+  if (!ko_text_center("PENDANTS", pend_x + 5.0f, label_cy, 7.0f, label_col))
+    draw_tiny_text("PENDANTS", pend_x, y1 - 12.0f, 1.0f, label_col);
   int pend = sram8(0x74);
   static const int pbit[3] = {4, 2, 1};
   static const uint32_t pcol[3] = {COL(64, 200, 88), COL(70, 110, 240), COL(230, 60, 60)};
@@ -1102,7 +1148,10 @@ static void draw_gear(RectFS r) {
   }
 
   float cyC = y1 + 49.0f;
-  draw_tiny_text("CRYSTALS", x0, cyC - 12.0f, 1.0f, COL(250, 250, 250));
+  // The taller Korean label would touch the bottle slots above, so it sits
+  // on the crystal row's centre line, like the heart icon on the row below.
+  if (!ko_text_center("CRYSTALS", x0, cyC, 7.0f, label_col))
+    draw_tiny_text("CRYSTALS", x0, cyC - 12.0f, 1.0f, label_col);
   float crystal_start = x0 + 78.0f;
   float crystal_step = 23.0f;
   int owned7 = sram8(0x7A) & 0x7F, n_owned = 0;
@@ -1413,9 +1462,12 @@ static const char *wide_zoom_label(void) {
 }
 
 static void draw_screen_panel(RectFS r) {
-  draw_text("SCREEN", r.x + r.w / 2 - text_width("SCREEN", 3 * u) / 2,
-            r.y + 18 * u, 3 * u);
   screen_back_r = (RectFS){r.x + 20 * u, r.y + 12 * u, 90 * u, 38 * u};
+  float title_x = r.x + r.w / 2 - text_width("SCREEN", 3 * u) / 2;
+  // Korean: on the same centre line as the BACK button beside it.
+  if (!ko_text_center("SCREEN", title_x, screen_back_r.y + screen_back_r.h / 2,
+                      8 * 3 * u, COL(255, 255, 255)))
+    draw_text("SCREEN", title_x, r.y + 18 * u, 3 * u);
   draw_settings_row(&screen_back_r, false);
   draw_text("BACK", screen_back_r.x + screen_back_r.w / 2 - text_width("BACK", 2.2f * u) / 2,
             screen_back_r.y + screen_back_r.h / 2 - 9 * u, 2.2f * u);
@@ -1671,7 +1723,11 @@ static void draw_settings(RectFS r) {
       draw_developer_panel(r);
     return;
   }
-  draw_text("SETTINGS", r.x + r.w / 2 - text_width("SETTINGS", 3 * u) / 2, r.y + 18 * u, 3 * u);
+  float title_x = r.x + r.w / 2 - text_width("SETTINGS", 3 * u) / 2;
+  // Korean: centered between the frame and the first row (y0 below).
+  if (!ko_text_center("SETTINGS", title_x, box_title_center(r, r.y + 55 * u),
+                      8 * 3 * u, COL(255, 255, 255)))
+    draw_text("SETTINGS", title_x, r.y + 18 * u, 3 * u);
 
   char turbo_value[12];
 #ifdef __3DS__
