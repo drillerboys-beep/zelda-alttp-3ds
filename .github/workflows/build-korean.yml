@@ -32,6 +32,20 @@ jobs:
           chmod +x platform/3ds/build-kr.sh
           platform/3ds/build-kr.sh
 
+      - name: Verify outputs
+        run: |
+          cd build-3ds-kr/game
+          ls -la *.cia *.3dsx
+          test -s zelda3-3ds-kr-v3.2-KR1.cia
+          test -s zelda3-3ds-kr-v3.2-KR1.3dsx
+          {
+            echo "### Korean build outputs"
+            echo '```'
+            ls -la *.cia *.3dsx
+            sha1sum *.cia *.3dsx
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - uses: actions/upload-artifact@v4
         with:
           name: zelda3-3ds-korean
