@@ -11,6 +11,8 @@
 | 한글판 | 북미판 + 한글패치(싸이제로, 2013-01-16) | 3,145,728 (헤더 포함 3,146,240) | CRC-32 ad9ec76a (헤더 체크섬 4바이트 제외) |
 | 원본 | Legend of Zelda, The - A Link to the Past (USA) | 1,048,576 | SHA-1 6d4f10a8b10e10dbe624cb23cf03b88bb8252973 |
 
+확인에 쓴 파일 이름: 한글판 `The Legend of Zelda - A Link to the Past (Korea).smc`, 원본 `Legend of Zelda, The - A Link to the Past (USA).sfc`(→ `zelda3.sfc`로 이름 변경).
+
 ## SD카드
 
 ```

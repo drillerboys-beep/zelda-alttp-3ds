@@ -14,7 +14,9 @@ SFC판 「젤다의 전설 신들의 트라이포스」 한글패치 롬을 3DS 
 1. 아래 **Assets**에서 `.cia`(FBI로 설치) 또는 `.3dsx`(홈브류 런처) 중 하나를 받습니다.
 2. SD카드에 `3ds/Zelda 3DS KR` 폴더를 만들고 롬 두 개를 넣습니다.
    - `zelda3.sfc` : 북미판 원본 롬 (헤더 없음, SHA-1 `6d4f10a8b10e10dbe624cb23cf03b88bb8252973`)
+     - 흔히 쓰는 원래 파일 이름: `Legend of Zelda, The - A Link to the Past (USA).sfc` → 넣을 때 `zelda3.sfc`로 바꿔 주세요.
    - 한글판 롬 : 북미판 + 싸이제로 한글패치(2013-01-16). 파일 이름은 아무거나 괜찮습니다.
+     - 확인에 쓴 파일 이름: `The Legend of Zelda - A Link to the Past (Korea).smc` (헤더 포함 3,146,240바이트, 이름 그대로 넣어도 됩니다)
 3. `sdmc:/3ds/dspfirm.cdc`가 있어야 소리가 납니다.
 4. 처음 실행할 때 롬 선택 화면에서 **한글판 롬**을 고르면 한글 자료를 한 번 만들고 시작합니다.
 
