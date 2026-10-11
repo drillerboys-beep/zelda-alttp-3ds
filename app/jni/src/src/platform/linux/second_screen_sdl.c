@@ -367,12 +367,172 @@ static void draw_icon_inner(int cell, float x, float y, float size) {
   SDL_RenderCopyF(ss_r, tex_icons, &src, &dst);
 }
 
+// ---- Korean UI text (Korean build) ----
+// While the Korean language is active, the UI strings listed in ss_korean.h are
+// drawn with the Korean ROM's own dialogue font (font block part 0: 10 pages of
+// 16x16 glyphs, read from the user's ROM at first launch). Other strings, and
+// everything when another language is active, use the normal English renderer.
+#include "../../zelda_rtl.h"
+#include "../../util.h"
+#include "ss_korean.h"
+
+enum { kSSKoPageSize = 0x2000, kSSKoPages = 10, kSSKoCols = 16 };
+static SDL_Texture *make_tex(int w, int h, const void *px, bool blend);
+static SDL_Texture *tex_ko;
+static bool tex_ko_failed;
+
+static const char *ss_ko_text(const char *en) {
+  if (!en || !(g_zenv.dialogue_flags & kDialogueFlag_Korean))
+    return NULL;
+  for (size_t i = 0; i < sizeof(kSSKoText) / sizeof(kSSKoText[0]); i++)
+    if (strcmp(kSSKoText[i].en, en) == 0)
+      return kSSKoText[i].ko;
+  return NULL;
+}
+
+static const char *ss_utf8_next(const char *s, uint32_t *cp) {
+  const uint8_t *p = (const uint8_t *)s;
+  if (p[0] < 0x80) { *cp = p[0]; return s + 1; }
+  if ((p[0] & 0xe0) == 0xc0 && p[1]) { *cp = (p[0] & 0x1f) << 6 | (p[1] & 0x3f); return s + 2; }
+  if ((p[0] & 0xf0) == 0xe0 && p[1] && p[2]) {
+    *cp = (p[0] & 0x0f) << 12 | (p[1] & 0x3f) << 6 | (p[2] & 0x3f);
+    return s + 3;
+  }
+  *cp = '?';
+  return s + 1;
+}
+
+static int ss_ko_glyph(uint32_t cp) {
+  for (int i = 0; i < (int)(sizeof(kSSKoGlyphs) / sizeof(kSSKoGlyphs[0])); i++)
+    if (kSSKoGlyphs[i].cp == cp)
+      return i;
+  return -1;
+}
+
+// Decodes one 16x16 glyph (2bpp: 2 = ink, 1 = outline) the way the Korean
+// dialogue renderer lays it out: two tiles wide, bottom half 32 tiles later.
+static void ss_ko_decode(const uint8_t *font, int page, int idx, uint8_t out[16][16]) {
+  memset(out, 0, 16 * 16);
+  if (page < 0 || page >= kSSKoPages || idx < 0 || idx > 0x5f)
+    return;
+  const uint8_t *base = font + page * kSSKoPageSize;
+  int r10 = (((idx & 0x70) * 2) + (idx & 0xf)) * 2;
+  static const int kTile[4][3] = {{0, 0, 0}, {1, 8, 0}, {32, 0, 8}, {33, 8, 8}};
+  for (int t = 0; t < 4; t++) {
+    const uint8_t *tp = base + (r10 + kTile[t][0]) * 16;
+    for (int y = 0; y < 8; y++) {
+      uint8_t b0 = tp[y * 2], b1 = tp[y * 2 + 1];
+      for (int x = 0; x < 8; x++)
+        out[kTile[t][2] + y][kTile[t][1] + x] =
+            ((b0 >> (7 - x)) & 1) | (((b1 >> (7 - x)) & 1) << 1);
+    }
+  }
+}
+
+static bool ensure_ko_tex(void) {
+  if (tex_ko)
+    return true;
+  if (tex_ko_failed)
+    return false;
+  MemBlk font = FindIndexInMemblk(g_zenv.dialogue_font_blk, 0);
+  if (!font.ptr || font.size < kSSKoPages * kSSKoPageSize) {
+    tex_ko_failed = true;
+    return false;
+  }
+  int n = (int)(sizeof(kSSKoGlyphs) / sizeof(kSSKoGlyphs[0]));
+  int rows = (n + kSSKoCols - 1) / kSSKoCols;
+  int pw = kSSKoCols * 16, ph = rows * 16;
+  uint32_t *px = calloc((size_t)pw * ph, sizeof(uint32_t));
+  if (!px) {
+    tex_ko_failed = true;
+    return false;
+  }
+  for (int i = 0; i < n; i++) {
+    const SSKoGlyph *g = &kSSKoGlyphs[i];
+    uint8_t img[16][16], donor[16][16];
+    ss_ko_decode(font.ptr, g->page, g->idx, img);
+    for (int o = 0; o < g->op_count; o++) {
+      const SSKoGlyphOp *op = &g->ops[o];
+      ss_ko_decode(font.ptr, op->page, op->idx, donor);
+      for (int r = 0; r < op->rows; r++) {
+        int sy = op->src_row + r, dy = op->dst_row + r;
+        if (sy > 15 || dy > 15)
+          break;
+        for (int x = op->x0; x < op->x1 && x < 16; x++)
+          img[dy][x] = donor[sy][x];
+      }
+    }
+    int cx = (i % kSSKoCols) * 16, cy = (i / kSSKoCols) * 16;
+    for (int y = 0; y < 16; y++)
+      for (int x = 0; x < 16; x++)
+        px[(cy + y) * pw + cx + x] = img[y][x] == 2 ? 0xffffffffu :
+                                     img[y][x] == 1 ? 0xff101018u : 0;
+  }
+  tex_ko = make_tex(pw, ph, px, true);
+  free(px);
+  if (!tex_ko)
+    tex_ko_failed = true;
+  return tex_ko != NULL;
+}
+
+// Integer glyph scale whose ~12px ink height best matches the English letters.
+static int ss_ko_scale(float letter_px) {
+  int k = (int)floorf(letter_px / 12.0f + 0.5f);
+  return k < 1 ? 1 : k;
+}
+
+static float ss_ko_advance(uint32_t cp) {
+  if (cp == ' ')
+    return 5;
+  return cp < 0x80 ? 8 : 13;  // Latin letters come from page 9 of the same font
+}
+
+static float ss_ko_width(const char *ko, float letter_px) {
+  int k = ss_ko_scale(letter_px);
+  float w = 0;
+  uint32_t cp;
+  while (*ko) {
+    ko = ss_utf8_next(ko, &cp);
+    w += ss_ko_advance(cp) * k;
+  }
+  return w;
+}
+
+// center_y: vertical center of the English text line being replaced.
+static void ss_ko_draw(const char *ko, float x, float center_y, float letter_px, uint32_t c) {
+  if (!ensure_ko_tex())
+    return;
+  int k = ss_ko_scale(letter_px);
+  float y = floorf(center_y - 7.0f * k + 0.5f);
+  float cx = floorf(x + 0.5f);
+  SDL_SetTextureColorMod(tex_ko, (c >> 16) & 0xff, (c >> 8) & 0xff, c & 0xff);
+  uint32_t cp;
+  while (*ko) {
+    ko = ss_utf8_next(ko, &cp);
+    int gi = cp == ' ' ? -1 : ss_ko_glyph(cp);
+    if (gi >= 0) {
+      SDL_Rect src = {(gi % kSSKoCols) * 16, (gi / kSSKoCols) * 16, 16, 16};
+      SDL_FRect dst = {cx, y, 16.0f * k, 16.0f * k};
+      SDL_RenderCopyF(ss_r, tex_ko, &src, &dst);
+    }
+    cx += ss_ko_advance(cp) * k;
+  }
+}
+
 static float text_width(const char *s, float sc) {
+  const char *ko = ss_ko_text(s);
+  if (ko)
+    return ss_ko_width(ko, 8 * sc);
   float w = 0;
   for (; *s; s++) w += (*s == ' ' ? 5 : 8) * sc;
   return w;
 }
 static void draw_text(const char *s, float x, float y, float sc) {
+  const char *ko = ss_ko_text(s);
+  if (ko) {
+    ss_ko_draw(ko, x, y + 4 * sc, 8 * sc, 0xffffffffu);
+    return;
+  }
   static const int kDigitGlyph[10] = {
     SS_GLYPH_DIGIT0, SS_GLYPH_DIGIT1, SS_GLYPH_DIGIT2, SS_GLYPH_DIGIT3, SS_GLYPH_DIGIT4,
     SS_GLYPH_DIGIT5, SS_GLYPH_DIGIT6, SS_GLYPH_DIGIT7, SS_GLYPH_DIGIT8, SS_GLYPH_DIGIT9,
@@ -427,6 +587,9 @@ static const uint8_t *tiny_letter(char ch) {
 }
 
 static float tiny_text_width(const char *s, float sc) {
+  const char *ko = ss_ko_text(s);
+  if (ko)
+    return ss_ko_width(ko, 7 * sc);
   float w = 0;
   for (; *s; s++)
     w += (*s == ' ' ? 4 : 6) * sc;
@@ -434,6 +597,11 @@ static float tiny_text_width(const char *s, float sc) {
 }
 
 static void draw_tiny_text(const char *s, float x, float y, float sc, uint32_t c) {
+  const char *ko = ss_ko_text(s);
+  if (ko) {
+    ss_ko_draw(ko, x, y + 3.5f * sc, 7 * sc, c);
+    return;
+  }
   float cx = floorf(x + 0.5f);
   float cy = floorf(y + 0.5f);
   for (; *s; s++) {
@@ -2808,7 +2976,8 @@ static void destroy_textures(void) {
   SDL_Texture **texes[] = {&tex_map[0], &tex_map[1], &tex_icons, &tex_glyphs,
                            &tex_letters, &tex_face, &tex_floor, &tex_mapicons,
                            &tex_bg_menu, &tex_bg_parch, &tex_bg_stone,
-                           &tex_triforce};
+                           &tex_triforce, &tex_ko};
+  tex_ko_failed = false;
   for (size_t i = 0; i < sizeof(texes) / sizeof(texes[0]); i++) {
     if (*texes[i]) SDL_DestroyTexture(*texes[i]);
     *texes[i] = NULL;
