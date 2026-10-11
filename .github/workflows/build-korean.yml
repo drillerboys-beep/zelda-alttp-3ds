@@ -4,7 +4,6 @@ on:
   workflow_dispatch:
   push:
     branches: [korean]
-    tags: ['v*-KR*']
 
 permissions:
   contents: write
@@ -57,12 +56,15 @@ jobs:
             build-3ds-kr/game/*.cia
             build-3ds-kr/game/*.3dsx
 
-      # A pushed v*-KR* tag publishes the build as the latest GitHub release.
+      # A push whose commit message contains [release] publishes the build as
+      # the latest GitHub release (tag v3.2-KR1, created or updated here).
       - name: Publish release
-        if: startsWith(github.ref, 'refs/tags/')
+        if: contains(github.event.head_commit.message, '[release]')
         uses: softprops/action-gh-release@v2
         with:
-          name: Zelda ALttP 3DS 한국어판 ${{ github.ref_name }}
+          tag_name: v3.2-KR1
+          target_commitish: ${{ github.sha }}
+          name: Zelda ALttP 3DS 한국어판 v3.2-KR1
           body_path: .github/release-notes-kr.md
           make_latest: true
           files: |
