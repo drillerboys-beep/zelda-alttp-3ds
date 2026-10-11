@@ -380,6 +380,14 @@ enum { kSSKoPageSize = 0x2000, kSSKoPages = 10, kSSKoCols = 16 };
 static SDL_Texture *make_tex(int w, int h, const void *px, bool blend);
 static SDL_Texture *tex_ko;
 static bool tex_ko_failed;
+// Ink extents per glyph (columns of colour 2), measured when the atlas is built.
+static int8_t ss_ko_lo[sizeof(kSSKoGlyphs) / sizeof(kSSKoGlyphs[0])];
+static int8_t ss_ko_hi[sizeof(kSSKoGlyphs) / sizeof(kSSKoGlyphs[0])];
+static bool ss_ko_metrics_ready;
+enum {
+  kSSKoGlyphGap = 2,  // px between syllables (room for the 1px outlines)
+  kSSKoSpace = 4,     // extra px for a space between words (6px word gap)
+};
 
 static const char *ss_ko_text(const char *en) {
   if (!en || !(g_zenv.dialogue_flags & kDialogueFlag_Korean))
@@ -462,12 +470,23 @@ static bool ensure_ko_tex(void) {
           img[dy][x] = donor[sy][x];
       }
     }
+    int lo = 16, hi = -1;
+    for (int y = 0; y < 16; y++)
+      for (int x = 0; x < 16; x++)
+        if (img[y][x] == 2) {
+          if (x < lo) lo = x;
+          if (x > hi) hi = x;
+        }
+    if (hi < 0) { lo = 0; hi = 3; }
+    ss_ko_lo[i] = (int8_t)lo;
+    ss_ko_hi[i] = (int8_t)hi;
     int cx = (i % kSSKoCols) * 16, cy = (i / kSSKoCols) * 16;
     for (int y = 0; y < 16; y++)
       for (int x = 0; x < 16; x++)
         px[(cy + y) * pw + cx + x] = img[y][x] == 2 ? 0xffffffffu :
                                      img[y][x] == 1 ? 0xff101018u : 0;
   }
+  ss_ko_metrics_ready = true;
   tex_ko = make_tex(pw, ph, px, true);
   free(px);
   if (!tex_ko)
@@ -481,21 +500,30 @@ static int ss_ko_scale(float letter_px) {
   return k < 1 ? 1 : k;
 }
 
-static float ss_ko_advance(uint32_t cp) {
-  if (cp == ' ')
-    return 5;
-  return cp < 0x80 ? 8 : 13;  // Latin letters come from page 9 of the same font
-}
-
-static float ss_ko_width(const char *ko, float letter_px) {
-  int k = ss_ko_scale(letter_px);
-  float w = 0;
+// Width of the visible ink of a string, in font pixels (before scaling).
+// Glyphs are packed by their real ink width plus kSSKoGlyphGap; a space adds
+// kSSKoSpace. Falls back to the font's own advance before the atlas exists.
+static int ss_ko_ink_width(const char *ko) {
+  int w = 0, pending_gap = 0;
   uint32_t cp;
   while (*ko) {
     ko = ss_utf8_next(ko, &cp);
-    w += ss_ko_advance(cp) * k;
+    if (cp == ' ') {
+      pending_gap += kSSKoSpace;
+      continue;
+    }
+    int gi = ss_ko_glyph(cp);
+    int gw = (gi >= 0 && ss_ko_metrics_ready) ? ss_ko_hi[gi] - ss_ko_lo[gi] + 1 :
+             (cp < 0x80 ? 6 : 11);
+    w += pending_gap + gw;
+    pending_gap = kSSKoGlyphGap;
   }
   return w;
+}
+
+static float ss_ko_width(const char *ko, float letter_px) {
+  ensure_ko_tex();
+  return (float)ss_ko_ink_width(ko) * ss_ko_scale(letter_px);
 }
 
 // center_y: vertical center of the English text line being replaced.
@@ -507,15 +535,23 @@ static void ss_ko_draw(const char *ko, float x, float center_y, float letter_px,
   float cx = floorf(x + 0.5f);
   SDL_SetTextureColorMod(tex_ko, (c >> 16) & 0xff, (c >> 8) & 0xff, c & 0xff);
   uint32_t cp;
+  int pending_gap = 0;
   while (*ko) {
     ko = ss_utf8_next(ko, &cp);
-    int gi = cp == ' ' ? -1 : ss_ko_glyph(cp);
-    if (gi >= 0) {
-      SDL_Rect src = {(gi % kSSKoCols) * 16, (gi / kSSKoCols) * 16, 16, 16};
-      SDL_FRect dst = {cx, y, 16.0f * k, 16.0f * k};
-      SDL_RenderCopyF(ss_r, tex_ko, &src, &dst);
+    if (cp == ' ') {
+      pending_gap += kSSKoSpace;
+      continue;
     }
-    cx += ss_ko_advance(cp) * k;
+    int gi = ss_ko_glyph(cp);
+    if (gi < 0)
+      continue;
+    cx += pending_gap * k;
+    // Place the glyph so its first ink column lands on cx.
+    SDL_Rect src = {(gi % kSSKoCols) * 16, (gi / kSSKoCols) * 16, 16, 16};
+    SDL_FRect dst = {cx - ss_ko_lo[gi] * k, y, 16.0f * k, 16.0f * k};
+    SDL_RenderCopyF(ss_r, tex_ko, &src, &dst);
+    cx += (ss_ko_hi[gi] - ss_ko_lo[gi] + 1) * k;
+    pending_gap = kSSKoGlyphGap;
   }
 }
 
